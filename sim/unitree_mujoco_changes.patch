@@ -1,0 +1,69 @@
+diff --git a/simulate_python/config.py b/simulate_python/config.py
+index 55ed043..00b3604 100644
+--- a/simulate_python/config.py
++++ b/simulate_python/config.py
+@@ -1,14 +1,16 @@
+ ROBOT = "go2" # Robot name, "go2", "b2", "b2w", "h1", "go2w", "g1" 
+-ROBOT_SCENE = "../unitree_robots/" + ROBOT + "/scene.xml" # Robot scene
+-DOMAIN_ID = 1 # Domain id
++ROBOT_SCENE = "../unitree_robots/" + ROBOT + "/scene_obstacles.xml" # Robot scene (scene.xml = full w/ steps; scene_fast.xml = steps, no shadows; scene_flat.xml = empty flat; scene_obstacles.xml = flat + pillars/boxes/walls for the lidar)
++DOMAIN_ID = 0 # Domain id
+ INTERFACE = "lo" # Interface 
+ 
+-USE_JOYSTICK = 1 # Simulate Unitree WirelessController using a gamepad
++USE_JOYSTICK = 0 # Simulate Unitree WirelessController using a gamepad
+ JOYSTICK_TYPE = "xbox" # support "xbox" and "switch" gamepad layout
+ JOYSTICK_DEVICE = 0 # Joystick number
+ 
+ PRINT_SCENE_INFORMATION = True # Print link, joint and sensors information of robot
+ ENABLE_ELASTIC_BAND = False # Virtual spring band, used for lifting h1
+ 
++ENABLE_LIDAR = True # Publish a simulated utlidar (rt/utlidar/cloud_deskewed, robot_pose) from ray casts; see sim_lidar.py
++
+ SIMULATE_DT = 0.005  # Need to be larger than the runtime of viewer.sync()
+-VIEWER_DT = 0.02  # 50 fps for viewer
++VIEWER_DT = 0.033  # ~30 fps for viewer (was 0.02)
+diff --git a/simulate_python/unitree_mujoco.py b/simulate_python/unitree_mujoco.py
+index 95b934f..ed03854 100755
+--- a/simulate_python/unitree_mujoco.py
++++ b/simulate_python/unitree_mujoco.py
+@@ -38,16 +38,27 @@ time.sleep(0.2)
+ def SimulationThread():
+     global mj_data, mj_model
+ 
++    if config.ENABLE_LIDAR:  # lidar frames are too big for loopback DDS unless messages are fragmented
++        from sim_lidar import cap_dds_message_size
++        cap_dds_message_size()
+     ChannelFactoryInitialize(config.DOMAIN_ID, config.INTERFACE)
+     unitree = UnitreeSdk2Bridge(mj_model, mj_data)
+ 
++    if config.ENABLE_LIDAR:
++        from sim_lidar import SimLidar
++        SimLidar(mj_model, mj_data, locker).start()
++
+     if config.USE_JOYSTICK:
+         unitree.SetupJoystick(device_id=0, js_type=config.JOYSTICK_TYPE)
+     if config.PRINT_SCENE_INFORMATION:
+         unitree.PrintSceneInformation()
+ 
++    rtf_wall, rtf_sim = time.perf_counter(), mj_data.time
+     while viewer.is_running():
+         step_start = time.perf_counter()
++        if step_start - rtf_wall >= 5.0:  # diagnostic: sim seconds per wall second
++            print("[sim] real-time factor %.2f" % ((mj_data.time - rtf_sim) / (step_start - rtf_wall)), flush=True)
++            rtf_wall, rtf_sim = step_start, mj_data.time
+ 
+         locker.acquire()
+ 
+diff --git a/simulate_python/unitree_sdk2py_bridge.py b/simulate_python/unitree_sdk2py_bridge.py
+index a9ca97a..4b97266 100644
+--- a/simulate_python/unitree_sdk2py_bridge.py
++++ b/simulate_python/unitree_sdk2py_bridge.py
+@@ -234,6 +234,7 @@ class UnitreeSdk2Bridge:
+             self.high_state.position[2] = self.mj_data.sensordata[
+                 self.dim_motor_sensor + 12
+             ]
++            self.high_state.body_height = float(self.mj_data.qpos[2])
+ 
+             self.high_state.velocity[0] = self.mj_data.sensordata[
+                 self.dim_motor_sensor + 13
