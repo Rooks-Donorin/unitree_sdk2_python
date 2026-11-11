@@ -21,10 +21,12 @@ CELL = 0.1                    # m
 MAP_SIZE = 800                # cells per side (80 m square around the odom origin)
 OBST_Z = (0.15, 0.7)          # m above the floor: points in this band block the robot
 SELF_RADIUS = 0.25            # m; points this close to the robot centre aren't mapped (own body)
-HIT_DECAY = 2.0               # s; each cell's hit score decays with this time constant...
-MIN_SCORE = 3.0               # ...and the cell becomes an obstacle once the score reaches this,
-                              # so stray noise points (single hits) never count
-MAP_MEMORY = 120.0            # s; obstacles not confirmed again for this long are forgotten
+HIT_FRAMES = 3                # a cell becomes an obstacle only once this many SEPARATE lidar frames have hit it
+                              # (several points of one frame in the same cell count as one hit), so a stray
+                              # point, or one frame's worth of noise, never makes an obstacle...
+HIT_WINDOW = 5.0              # s; ...and the count starts over if a cell goes this long between hits
+HIT_DECAY = 2.0               # s; time constant for the clearing "misses" below (they fade like this)
+MAP_MEMORY = 1e8                # s; obstacles stay until the lidar sees through them (or K forgets the map)
 
 # Seen-through clearing: each lidar point means the beam from the lidar to it
 # crossed open space. Where that beam is at body height and crosses an
@@ -78,7 +80,8 @@ class ObstacleMap:
         self.clear()
 
     def clear(self):
-        self.score = np.zeros((MAP_SIZE, MAP_SIZE), np.float32)
+        self.hit_count = np.zeros((MAP_SIZE, MAP_SIZE), np.int16)    # separate frames that have hit each cell
+        self.hit_time = np.full((MAP_SIZE, MAP_SIZE), -1e9)          # when each cell was last hit
         self.misses = np.zeros((MAP_SIZE, MAP_SIZE), np.float32)
         self.confirmed = np.full((MAP_SIZE, MAP_SIZE), -1e9)
         self.last_hit = np.full((MAP_SIZE, MAP_SIZE), -1e9)
@@ -99,9 +102,7 @@ class ObstacleMap:
             return
         robot_xy = np.asarray(robot_xy, float)
         if self.last_add is not None:
-            decay = math.exp(-max(now - self.last_add, 0.0) / HIT_DECAY)
-            self.score *= decay
-            self.misses *= decay
+            self.misses *= math.exp(-max(now - self.last_add, 0.0) / HIT_DECAY)
         self.last_add = now
         z = points[:, 2] - floor_z
         xy = points[(z >= OBST_Z[0]) & (z <= OBST_Z[1]), :2]
@@ -109,10 +110,15 @@ class ObstacleMap:
         ij = self.to_cell(xy)
         ok = np.all((ij >= 0) & (ij < MAP_SIZE), axis=1)
         ij = ij[ok]
-        np.add.at(self.score, (ij[:, 0], ij[:, 1]), 1.0)
-        self.last_hit[ij[:, 0], ij[:, 1]] = now
-        hit = ij[self.score[ij[:, 0], ij[:, 1]] >= MIN_SCORE]
-        self.confirmed[hit[:, 0], hit[:, 1]] = now
+        keys = np.unique(ij[:, 0] * MAP_SIZE + ij[:, 1])             # each cell counts once per frame
+        i, j = keys // MAP_SIZE, keys % MAP_SIZE
+        stale = now - self.hit_time[i, j] > HIT_WINDOW               # not hit for a while: start counting again
+        self.hit_count[i[stale], j[stale]] = 0
+        self.hit_count[i, j] = np.minimum(self.hit_count[i, j] + 1, 1000)
+        self.hit_time[i, j] = now
+        self.last_hit[i, j] = now
+        sure = self.hit_count[i, j] >= HIT_FRAMES
+        self.confirmed[i[sure], j[sure]] = now
 
         origin = np.array([robot_xy[0] + LIDAR_OFFSET[0] * math.cos(yaw),
                            robot_xy[1] + LIDAR_OFFSET[0] * math.sin(yaw),
@@ -144,6 +150,7 @@ class ObstacleMap:
         gone = (self.misses[i, j] >= CLEAR_MISSES) & (now - self.last_hit[i, j] > HIT_GUARD)
         self.confirmed[i[gone], j[gone]] = -1e9
         self.misses[i[gone], j[gone]] = 0.0
+        self.hit_count[i[gone], j[gone]] = 0         # an erased cell has to be hit HIT_FRAMES times again
         self.erased += int(gone.sum())
 
     def occupied(self, now):

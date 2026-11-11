@@ -37,3 +37,10 @@ __pycache__
 
 # python
 dist/
+
+# Go2 Wi-Fi AES key (secret)
+.go2_aes_key
+.venv_wifi/
+
+# Third-party reference clone (Harry He's go2-robot-dog); has its own .git, never commit it here
+go2-robot-dog/
